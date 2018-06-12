@@ -25,3 +25,5 @@ A stopwatch implementation with a TI msp430g2553 with an attached LTC-4627JR 4 d
    priority of the two timers, so the time update has precedence over display
    multiplexing. This is also where DisplayValue is incremented using the dadd
    instruction.
+
+   You can also find the same implementation in assembly in the "Stopwatch_ASM.s43" file.
