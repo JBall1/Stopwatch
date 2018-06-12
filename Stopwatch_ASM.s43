@@ -1,21 +1,35 @@
 ;-------------------------------------------------------------------------------
-;       Description:    This program first shows my chart number given, 2231.
-;                        Pressing the right most button will show "--31", likewise
-;                       pressing the left most button will show "21--" and finally
-;                        pressing the middle button will show "22.:3.1". This is
-;                        all acomplished on the msp430g2553 using the 4 digit 7-
-;                        segment display by using multiplexing as well as port2  
-;                        and a timerA0 interrupt.
-;                        
+;   Description: 
+;   This code provides a simple stop watch on a MSP430g2553 with custom display
+;   attached. The device will start at 00:00. Pressing the right most button 
+;   will start the timer, going up by miliseconds. Pressing the middle button at
+;   any time will reset the device to 00:00. You can press the left most button
+;   at any time to pause the timer. Once the timer reaches 99:90 it will stop on
+;   its own and wait for an input from the user. This all is accomplished using
+;   both push button interupts for the buttons respectively and using both timers
+;   on the board as well as using the dadd instruction to increment the value
+;   displayed
 ;
+;   Both Timers (TimerA_0 and TimerA_1) are set up
+;   TimerA_0 will be set up to update the display at the rate of one digit
+;   every 2 mS.  This results in no observable flicker in the multiplexing. 
+;   Slower rates such as 10 mS per digit result in observable flicker.  
 ;
+;   TimerA_1 will be set up to generate the 100 mS interval interrupts
+;   for timing for the stopwatch or clock. TimerA_1 has the higher
+;   priority of the two timers, so the time update has precedence over display
+;   multiplexing. This is also where DisplayValue is incremented using the dadd
+;   instruction.
+;
+;   Target: TI LaunchPad development board with MSP430G2553 device with the
+;    custom Display Board installed
+;
+;       Date:           April 10, 2018
 ;       Written by:     Joshua Ball
-;       Date:           3/28/2018
 ;       Company:        Texas Tech University
-;       Adapted from:   DemoWith_4digitExpansionBdSimpleTimerInterrupt.s43 by Dr. Michael Helm
-;       Target Device:  Texas Instruments MSP430G2553 with the
-;                       LTC-4627JR 4 digit expansion Display Board installed
-;       Assembler/IDE:  IAR Embedded Workbench 6.50.1 Kickstart version;
+;       Adapted from:   DemoStopWatchFrameWork, by Dr. Helm
+;       Assembler/IDE:  IAR Embedded Workbench 5.5
+;
 ;       HW I/O assignments:
 ;       P1.0    (output) Segment A (active low) drives display board
 ;       P1.1    (output) Segment B (active low) drives display board
@@ -32,8 +46,8 @@
 ;       P2.3    (output) Digit 0 (active low) LSdigit (rightmost)
 ;       P2.4    (output) Other - (dots - colon)
 ;       P2.5    (input)  Pushbutton 0 (active low) (rightmost)
-;       P2.6    (input)  Pushbutton 1 (active low) (middle)
-;       P2.7    (input)  Pushbutton 2 (active low) (leftmost)
+;       P2.6    (input)  Pushbutton 1 (active low) (leftmost)
+;       P2.7    (input)  Pushbutton 2 (active low) (middle)
 ;
 ;
 ;
@@ -43,12 +57,25 @@
 ; Definition of Constants
 ;-------------------------------------------------------------------------------
 
-; NOTE: purposely set slow to demonstrate display multiplexing
-;TIMER_A_COUNT_1   EQU   10000    ; set count value in TimerA_0 
-TIMER_A_COUNT_1   EQU   100    ; set count value in TimerA_0 
-;TIMER_A_COUNT_1   EQU   1000    ; set count value in TimerA_0 
-LONG_DELAY      EQU     65535  ; max 16 bit value (FFFFh)
-;definitions of segment positions 
+;LONG_DELAY      EQU     65535  ; max 16 bit value (FFFFh)
+LONG_DELAY      EQU     600  ; 
+;LONG_DELAY      EQU     600  ; 
+SHORT_DELAY     EQU     5000  ; 
+
+DISPLAY_DELAY   EQU    50  ;
+
+
+TIMER_A0_COUNT_1   EQU   2000    ; set count value for TimerA_0  
+;results in a 2 mS interrupt rate for updating each digit position in the
+; display based on 1 MHz SMCLK/1 and counting 2000 of the 1 uS clock events
+TIMER_A1_COUNT_1   EQU   50000    ; set count value for TimerA_1  
+; results in a 100 mS basic interrupt rate based on 1 MHz SMCLK/2
+; this will be a clock rate of one event per 2 uS, counting 50000 of those
+; results in one interrupt every 100 mS from this timer
+
+MAX_TIMER_COUNT  EQU    10  ; number of TimerA1 Interrupts that have to occur
+; to equal 1 second of elapsed time.
+
 SEG_A         EQU     %00000001 ; Port pin position P1.0
 SEG_B         EQU     %00000010 ; Port pin position P1.1
 SEG_C         EQU     %00000100 ; Port pin position P1.2
@@ -73,19 +100,20 @@ DIG_3         EQU     %00000001 ; Port pin position P2.0 (MSdigit)
 DIG_2         EQU     %00000010 ; Port pin position P2.1
 DIG_1         EQU     %00000100 ; Port pin position P2.2
 DIG_0         EQU     %00001000 ; Port pin position P2.3(LSdigit)
-DP_COM        EQU     %00010000 ; Port pin position P2.4
+COL_DG_COM    EQU     %00010000 ; Port pin position P2.4
 
 ;since inverted pattern is needed for the display, this defines inverse pattern
 DIG_3_N       EQU     ~DIG_3 ; Port pin position P2.0 (MSdigit)
 DIG_2_N       EQU     ~DIG_2 ; Port pin position P2.1
 DIG_1_N       EQU     ~DIG_1 ; Port pin position P2.2
 DIG_0_N       EQU     ~DIG_0 ; Port pin position P2.3(LSdigit)
-DP_COM_N      EQU     ~DP_COM ; Port pin position P2.4
-DIG_4_N       EQU      DP_COM_N
+COL_DG_COM_N  EQU     ~COL_DG_COM ; Port pin position P2.4
 
-PB_0         EQU     %00100000 ; Port pin position P2.5
-PB_1         EQU     %01000000 ; Port pin position P2.6
-PB_2         EQU     %10000000 ; Port pin position P2.7
+
+;Pushbutton assignments CORRECTED to compensate for board layout swap
+PB_0         EQU     %00100000 ; Port pin position P2.5  RightMost button
+PB_1         EQU     %10000000 ; Port pin position P2.7  Middle button
+PB_2         EQU     %01000000 ; Port pin position P2.6  LeftMost button
 
 
 SEG_PORT         EQU     P1OUT
@@ -115,25 +143,45 @@ SEVEN_N         EQU     ~%00000111
 EIGHT_N         EQU     ~%01111111
 NINE_N          EQU     ~%01100111
 ZERO_N          EQU     ~%00111111
-COLON_N         EQU     ~%11111111
-TWO_N_DP        EQU     ~%11011011
-THREE_N_DP      EQU     ~%11001111
+
+
 ;-------------------------------------------------------------------------------
 ; Definition of Variables
 ;-------------------------------------------------------------------------------
 
             ORG   0x0200     ; beginning of RAM space (necessary statement)
             
+NewVar         DB  0
+ExampleVar     DB  0
+timerGO        DW  0
+DecimalOn      DW  0
+            
+TotalINTCount0 DW  0         ;global variable used by Timer0 ISR  
+
+TotalINTCount1 DW  0         ;global variable used by Timer1 ISR   
+
 DisplayValue  DW  0         ; contains 4 digit value to display in BCD format
                             ; BCDdig3 | BCDdig2  | BCDdig1  | BCDdig0
                             ; xxxx      xxxx       xxxx       xxxx
                             
 CurrentDigitPos  DB  0      ;global variable used by WriteDigitToDisplay ISR
                             ; holds digit position of current digit to write
-
+                            
 CurrentDigitValue DB 0      ;global variable used by WriteDigitToDisplay ISR
-                            ; holds digit value of next digit to write                           
-DecimalOn       DB 0
+                            ; holds digit value of next digit to write   
+                            
+Ten_mS          DB  0       ;contains current 10 mS count
+Hundred_mS      DB  0       ;contains current 100 mS count
+Seconds         DB  0       ;contains current 1 second count
+TenSeconds      DB  0       ;contains current 10 second count
+
+CountMode       DB  0       ;Boolean flag, TRUE (1) when counting
+
+PB_0_Mode       DB   0
+PB_1_Mode       DB   0
+PB_2_Mode       DB   0
+
+;mov.w               #0x0000, &DisplayValue
 ;-------------------------------------------------------------------------------
             ORG     0xC000                  ; Program Reset (prog memory start)
                                             ; this is Program memory start 
@@ -144,58 +192,83 @@ RESET       mov.w   #0x0400,SP        ; Initialize stackpointer(to end of RAM +1
                                      
 StopWDT     mov.w   #WDTPW+WDTHOLD,&WDTCTL  ; Stop WDT
 
-SetupP1   
-            
-            clr.b   &P2IFG
-            mov.b   #0xFF, &P1DIR  ; all as outputs          
-            bis.b   #PB_0+PB_1+PB_2, &P2IE    ; enable interrput for Pushbutton
-            mov.b   #DIG_3+DIG_2+DIG_1+DIG_0+DP_COM, &P2DIR
-            bis.b   #PB_0+PB_1+PB_2, &P2IES   ; set edge select for high to low trans
-            clr.b   &P2IFG
-            clr DisplayValue
-            clr DecimalOn
-            
-            
-; activate the General Purpose Digital I/O mode for P2.6 and P2.7
-           bic.b   #PB_1+PB_2, &P2SEL
+SetupP1     mov.b   #0xFF, &P1DIR  ; all as outputs          
+            mov.b   #0x1F, &P2DIR ; all but 3 MSbits as outputs   
                                                                                         
            ; The PushButtons are wired to P2.5,6,7 (active LOW), so we need to  
            ; turn on the internal Pullup Resistors  - this is done with P2REN
            ; register
            
-           ; 
            mov.b    #PB_0+PB_1+PB_2, &P2REN    ;turn on the internal resistor
            mov.b    #PB_0+PB_1+PB_2, &P2OUT    ; set the resistor to Pullup mode
-
-           ; turn off all the segments and digits
-           mov.b #0xFF, &SEG_PORT
-           mov.b #0xFF, &DIG_PORT    
            
-SetupTimerA
-            mov.w   #TIMER_A_COUNT_1,&TA0CCR0 ;load a count value into the counter
+; activate the General Purpose Digital I/O mode for P2.6 and P2.7
+           bic.b   #PB_1+PB_2, &P2SEL
+           
+           ;setup Port 2 interrupts for the pushbuttons
+           bis.b   #PB_0+PB_1+PB_2, &P2IE    ; enable interrput for Pushbutton
+           bis.b   #PB_0+PB_1+PB_2, &P2IES   ; set edge select for high to low trans           
+
+           
+           ; turn off all the segments and digits
+           mov.b #0FFh, &SEG_PORT
+           mov.b #0FFh, &DIG_PORT  
+         
+SetupCalibratedClock       
+; Set up the clock (calibrated mode at 1 MHz)
+; Get the calibrated data for the DCO clock
+; Set DCO to 1 MHz:  (this directly from TI Family Guide page283 and 284
+          CLR.B &DCOCTL ; Select lowest DCOx  and MODx settings
+          MOV.B &CALBC1_1MHZ,&BCSCTL1 ; Set range
+          MOV.B &CALDCO_1MHZ,&DCOCTL ; Set DCO step + modulation       
+           
+SetupTimerA0
+            ;these 3 lines of code sets up the first Timer, TimerA_0
+            ; note the difference in register names
+            ; this one is set up to provide the 2 mS intervals to update
+            ; the next digit of the multiplexed display
+            mov.w   #TIMER_A0_COUNT_1,&TA0CCR0 ;load a count value into the counter
             mov.w   #CCIE,&TA0CCTL0        ; enable the timer interrupt
+
+            mov.w   #TASSEL_2+ID_0+MC_1,&TA0CTL   ; select SMCLK/1, up mode  
       
-            ;mov.w   #TASSEL_2+ID_1+MC_1,&TA0CTL   ; select SMCLK/2, up mode
-            mov.w   #TASSEL_2+ID_3+MC_1,&TA0CTL   ; select SMCLK/8, up mode            
+SetupTimerA1      
+            ;these 3 lines of code sets up the second Timer, TimerA_1
+            ; note the difference in register names  
+            ; this timer is set up to generate the 100 mS intervals for the
+            ; basic clock counting rate  (it has higher priority than TimerA_0
+            mov.w   #TIMER_A1_COUNT_1,&TA1CCR0 ;load a count value into the counter
+            mov.w   #CCIE,&TA1CCTL0        ; enable the timer interrupt
+
+            mov.w   #TASSEL_2+ID_1+MC_1,&TA1CTL   ; select SMCLK/2, up mode                
       
 
+            mov.w  #0, &TotalINTCount0  ; make sure the total count is zero'ed
             
-EnableGeneralInterrupts
-            clr.b   &P2IFG
-            bis.b #GIE,SR          ; enable the general interrupts bit
-             ;eint    ; this is another option to do the same thing
+ClearRAMVariables  
+            clr.b   &Ten_mS
+            clr.b   &Hundred_mS
+            clr.b   &Seconds
+            clr.b   &TenSeconds
+            clr.b   &CountMode    
+            clr.b   &PB_0_Mode      
+            clr.b   &PB_1_Mode  
+            clr.b   &PB_2_Mode 
+            clr.w   &timerGO
+            ;clr.w     &DisplayValue
+            
+            
+ClearInterruptFlags
+           clr.b   &P1IFG     ; clear the Int flag register for Port 1 
+           clr.b   &P2IFG     ; clear the Int flag register for Port 2            
  
-    ; start of main program   
+ 
+EnableGeneralInterrupts
+            bis.b #GIE,SR          ; enable the general interrupts bit
+            ; eint    ; this is another option to do the same thing
+            
 
-DisplayTop     
-           ;put something into DisplayValue so we can write it out
-           clr.b &DisplayValue
-           clr.b   &P2IFG
-           mov #0x2231, &DisplayValue
-
-
-
-Done      
+Done
           jmp Done   ; idle here and wait on Timer interrupts
                       ; Each timer interrupt will update next digit in display
 
@@ -215,38 +288,6 @@ Done
 ;  uses: R15, global variable CurrentDigitPos, CurrentDigitValue
 ;-------------------------------------------------------------------------------
 WriteNextDigitToDisplay
-    //if DecimalOn has a value put into it, go to the WriteWithColon Function
-    bit.b #00000001,DecimalOn
-    jne WriteWithColon
-    //This means there was no value, just putting 0's to make sure and keep thing
-    ;clean
-    mov 0x0000, DecimalOn
-    
-    
-
-;This means there was not a colon so this function executes    
-WriteWithoutColon
-    mov 0x0000, DecimalOn
-    push R15
-    
-    
-    cmp #0, &CurrentDigitPos
-    jeq  WriteDig0
-    
-    cmp #1, &CurrentDigitPos
-    jeq  WriteDig1
-    
-    cmp #2, &CurrentDigitPos
-    jeq  WriteDig2
-    
-    cmp #3, &CurrentDigitPos
-    jeq  WriteDig3
-    
-    clr &CurrentDigitPos   ; reset it
-    jmp DoneWithDigitWriteTotally  ; get out of here
-
-;this means there was a value in DecimalOn
-WriteWithColon
     push R15     ; save R15 since we use it here
     ;clr.b R15
     
@@ -268,9 +309,6 @@ WriteWithColon
     ; invalid case - CurrentDigPos is invalid value
     clr &CurrentDigitPos   ; reset it
     jmp DoneWithDigitWriteTotally  ; get out of here
-    
-    
-    
     
 WriteDig0
     mov.b #0FFh,DIG_PORT
@@ -328,7 +366,7 @@ WriteDig4
     ; use the value in R15 as an offset or index into SegPatternTable
     ;add #SegPatternTable, R15  ; R15 now points to correct Seg pattern to write
     mov.b  R15, SEG_PORT       ; set up the pattern to write
-    mov.b #DIG_4_N, DIG_PORT
+    mov.b #COL_DG_COM_N, DIG_PORT
     ;clr.b R12
     jmp DoneWithDigitWrite
     
@@ -367,15 +405,14 @@ Loop1Long
 ; Button0
 ;  passed in - nothing
 ;  returned - nothing
-;  accomplishes - moving 0xAA31 into DisplayValue
-;  uses: PB_0,DisplayValue
+;  accomplishes - moving 1 into timerGO if the button was pressed
+;  uses: PB_0,timerGO
 ;-------------------------------------------------------------------------------
 Button0
-    mov #0xAA31, &DisplayValue
-    mov 0x0000, DecimalOn
+    mov.w #1, &timerGO
     clr.b   &P2IFG
     jmp Done_here
-ret
+    ret
 ;-------------------------------------------------------------------------------
 ;  end of Button0
 ;-------------------------------------------------------------------------------
@@ -383,14 +420,14 @@ ret
 ; Button1
 ;  passed in - nothing
 ;  returned - nothing
-;  accomplishes - moving 22AA into display value
-;  uses: PB_1,DisplayValue
+;  accomplishes - moving 0 into timerGO
+;  uses: PB_1,timerGO
 ;-------------------------------------------------------------------------------
-Button1
-    mov #0x22AA, &DisplayValue
-    mov 0x0000, DecimalOn
-    clr.b   &P2IFG
-    jmp Done_here
+Button1            
+             mov #0, timerGO
+             clr.b   &P2IFG
+             jmp Done_here
+
 ret
 ;-------------------------------------------------------------------------------
 ;  end of Button1
@@ -400,15 +437,15 @@ ret
 ; Button2
 ;  passed in - nothing
 ;  returned - nothing
-;  accomplishes - moving 0x2BC1 into DisplayValue and 0x0001 into DecimalOn
+;  accomplishes - clearing timergo and reseting the device
 ;  uses: PB_2,DisplayValue,DecimalOn
 ;-------------------------------------------------------------------------------
 Button2 
-        mov #0x2BC1, &DisplayValue
-        mov.b #00000001, DecimalOn
-        clr.b   &P2IFG
-        jmp Done_here
-ret
+            mov.w  #0x0000, &DisplayValue  
+            clr.w timerGO
+            clr.b &PB_2_Mode  ; clear the Boolean flag
+            jmp  Done_here   
+      ret
 ;-------------------------------------------------------------------------------
 ;  end of Button2
 ;-------------------------------------------------------------------------------
@@ -423,7 +460,31 @@ ret
 ;-------------------------------------------------------------------------------
 ;          Interrupt Service Routines
 ;-------------------------------------------------------------------------------
+;-------------------------------------------------------------------------------
+; Interrupt Service Routine for Timer_A 1
+;  Passed in: nothing
+;  Activated every time TimerA_1 times out
+;  Uses: updates global variable Hundred_mS, increments DisplayValue if 1 is in
+;        timerGO
+;-------------------------------------------------------------------------------
 
+TA1_ISR
+      cmp.b #1, &timerGO
+      jne Done_here
+      inc.b &Hundred_mS           ;update basic count increment
+      dadd.w  #0x0010, &DisplayValue
+      and #0xFFF0, &DisplayValue  
+      cmp.w #0x9990,&DisplayValue
+      jeq Stop
+      reti
+    
+Stop
+    mov #0, &timerGO
+    ret    
+
+;-------------------------------------------------------------------------------
+;  end of TA0_ISR   Timer_A 0 Interrupt Service Routine
+;-------------------------------------------------------------------------------
 ;-------------------------------------------------------------------------------
 ; Interrupt Service Routine for Timer_A 0
 ;  Passed in: nothing
@@ -439,6 +500,25 @@ TA0_ISR
 
 ;-------------------------------------------------------------------------------
 ;  end of TA0_ISR   Timer_A 0 Interrupt Service Routine
+;-------------------------------------------------------------------------------
+;-------------------------------------------------------------------------------
+; Port1_ISR
+;  passed in - nothing
+;  returned - nothing
+;  accomplishes - updates PatternStateFlag
+;  uses: nothing
+;-------------------------------------------------------------------------------
+Port1_ISR
+    ; if we get to here, an interrupt occurred on the Port 1
+    ; do something here if needed
+    
+    
+DoneWithPort_1_ISR
+clr.b &P1IFG    ; clear the flag so system is ready for another interrupt
+
+    reti         ; return from interrupt
+;-------------------------------------------------------------------------------
+;  end of Port1_ISR
 ;-------------------------------------------------------------------------------
 ;-------------------------------------------------------------------------------
 ; Interrupt Service Routine for Port2_ISR
@@ -496,9 +576,6 @@ SegPatternTable  ; contains patterns for each 7-seg number
      DB  SEVEN_N
      DB  EIGHT_N
      DB  NINE_N
-     DB  SEG_G_N
-     DB  TWO_N_DP
-     DB  THREE_N_DP
      
 ; usage: use DigitPatternTable as base address, then offset into table for
 ; a specific digit position to display
@@ -507,7 +584,7 @@ DigitPatternTable  ; contains patterns for each digit position common selection
      DB  DIG_1_N
      DB  DIG_2_N
      DB  DIG_3_N
-     DB  DIG_4_N
+     DB  COL_DG_COM_N
 
 
 ;-------------------------------------------------------------------------------
@@ -515,6 +592,12 @@ DigitPatternTable  ; contains patterns for each digit position common selection
 ;-------------------------------------------------------------------------------
             ORG     0xFFF2                  ;TimerA_0 Vector
             DW      TA0_ISR                 ;TimerA_0 Interrupt Service Routine
+            
+            ORG     0xFFFA                  ;TimerA_1 Vector
+            DW      TA1_ISR                 ;TimerA_1 Interrupt Service Routine    
+            
+            ORG     0xFFE4                  ; MSP430 Port 1 Interrupt Vector
+            DW      Port1_ISR               ; address of Port 1 ISR     
             
             ORG     0xFFE6                  ;P2 interupt
             DW      Port2_ISR               ;Address of Port2_ISR               
