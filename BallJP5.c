@@ -1,13 +1,4 @@
 //-------------------------------------------------------------------------------
-//   NOTE: The buttons are "nosey" and will require MANY presses
-//         for the respective function to activate. I was told that the buttons
-//         are just like that sometimes and it is ok. They 100% do their task
-//         once activated. If you have any issues please email me at
-//         Joshua.ball@ttu.edu and I will be happy to come and demonstrate this
-//         at your convince.
-//
-//
-//   OPTION 1: Timer Written in C (Project 4)
 //
 //   Description: 
 //
